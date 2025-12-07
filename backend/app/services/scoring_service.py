@@ -182,4 +182,34 @@ class ScoringService:
             return "passed"
 
 
+# ==============================================
+# FEATURE 6: PRIORITY SCORING
+# Helps sort violations by risk level
+# WHY: Allows prioritization of violations based on both severity and confidence
+#      so critical, high-confidence issues are addressed first
+# ==============================================
+SEVERITY_WEIGHTS = {
+    "critical": 5,
+    "high": 3,
+    "medium": 2,
+    "low": 1
+}
+
+
+def compute_priority(v: Dict) -> float:
+    """
+    Compute priority score for a violation.
+    
+    Args:
+        v: Violation dictionary with 'severity' and 'confidence' fields
+    
+    Returns:
+        Priority score (severity_weight × confidence)
+    """
+    severity = v.get("severity", "low")
+    confidence = v.get("confidence", 0.5)
+    weight = SEVERITY_WEIGHTS.get(severity, 1)
+    return weight * confidence
+
+
 scoring_service = ScoringService()

@@ -3,9 +3,67 @@ import json
 import asyncio
 from typing import Dict, Any, Optional, List
 import logging
+from pydantic import BaseModel
 from ..config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# ==============================================
+# FEATURE 3: DETERMINISTIC LLM PROMPT TEMPLATE
+# Ensures predictable JSON output from the model
+# WHY: Standardized prompts produce more consistent, parseable responses
+#      and reduce LLM hallucination/format errors
+# ==============================================
+LLM_PROMPT_TEMPLATE = """
+You are a compliance assistant analyzing marketing content.
+
+Analyze this chunk of content against the provided compliance rules.
+
+Return ONLY JSON formatted exactly like this:
+{{
+  "violations": [
+    {{
+      "rule_id": "optional rule identifier",
+      "message": "description of the violation",
+      "confidence": 0.85,
+      "severity": "critical|high|medium|low",
+      "category": "irdai|brand|seo",
+      "start_offset": 0,
+      "end_offset": 100
+    }}
+  ]
+}}
+
+Rules:
+{rules_text}
+
+Chunk:
+"""{chunk_text}"""
+
+Return ONLY the JSON object, no other text.
+"""
+
+
+# ==============================================
+# FEATURE 4: JSON SCHEMA VALIDATION USING PYDANTIC
+# Ensures LLM response fits expected schema
+# WHY: Type-safe validation prevents downstream errors from malformed LLM output
+# ==============================================
+class LLMViolation(BaseModel):
+    """Pydantic model for a single violation from LLM."""
+    rule_id: Optional[str] = None
+    message: str
+    confidence: float
+    severity: Optional[str] = "medium"
+    category: Optional[str] = "irdai"
+    start_offset: Optional[int] = None
+    end_offset: Optional[int] = None
+
+
+class LLMResponse(BaseModel):
+    """Pydantic model for complete LLM response."""
+    violations: List[LLMViolation]
 
 
 class OllamaService:
@@ -161,6 +219,78 @@ class OllamaService:
             "overall_assessment": "AI analysis service temporarily unavailable. Please try again later.",
             "key_issues": ["AI service unavailable"]
         })
+
+    # ==============================================
+    # FEATURE 3 (CONTINUED): PROMPT BUILDING METHOD
+    # Build prompts using the deterministic template
+    # ==============================================
+    def build_prompt_for_chunk(self, chunk_text: str, rules_text: str) -> str:
+        """Build a standardized prompt for a single chunk."""
+        return LLM_PROMPT_TEMPLATE.format(
+            chunk_text=chunk_text,
+            rules_text=rules_text
+        )
+
+    # ==============================================
+    # FEATURE 4 (CONTINUED): VALIDATION METHOD
+    # Generate and validate LLM response using Pydantic
+    # ==============================================
+    async def generate_and_validate_llm_response(self, prompt: str) -> Dict[str, Any]:
+        """Generate LLM response and validate it against Pydantic schema."""
+        try:
+            # Get raw response from LLM
+            raw_response = await self.generate_response(
+                prompt=prompt,
+                system_prompt="You are a compliance expert. Return ONLY valid JSON."
+            )
+            
+            # Try to parse as JSON
+            try:
+                response_dict = json.loads(raw_response)
+                # Validate with Pydantic
+                validated = LLMResponse(**response_dict)
+                return validated.model_dump()
+            except (json.JSONDecodeError, Exception) as e:
+                logger.warning(f"LLM response validation failed: {str(e)}")
+                # Use fallback parser
+                return heuristic_parse(raw_response)
+                
+        except Exception as e:
+            logger.error(f"Error in generate_and_validate_llm_response: {str(e)}")
+            return {"violations": []}
+
+
+# ==============================================
+# FEATURE 5: FALLBACK PARSER
+# Used when LLM output is broken or invalid JSON
+# WHY: Graceful degradation ensures system doesn't crash on bad LLM output
+#      while still attempting to extract useful information
+# ==============================================
+def heuristic_parse(resp_text: str) -> Dict[str, Any]:
+    """Parse LLM response using heuristics when JSON parsing fails."""
+    text = resp_text.lower()
+    violations = []
+    
+    # Check for common compliance red flags
+    if "guaranteed" in text or "100%" in text:
+        violations.append({
+            "rule_id": None,
+            "message": "Possible guaranteed return claim detected",
+            "confidence": 0.4,
+            "severity": "high",
+            "category": "irdai"
+        })
+    
+    if "risk-free" in text or "no risk" in text:
+        violations.append({
+            "rule_id": None,
+            "message": "Possible risk-free claim detected",
+            "confidence": 0.35,
+            "severity": "high",
+            "category": "irdai"
+        })
+    
+    return {"violations": violations}
 
     async def __aenter__(self):
         return self
